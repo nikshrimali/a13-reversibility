@@ -31,72 +31,120 @@ All four reuse a10's block unchanged (LayerNorm, attention, LayerNorm, MLP) and 
 
 ## Results
 
-Every number here is copied from the executed `reversibility.ipynb`: Google Colab, one T4, torch 2.14.1, November 2026. None is estimated.
+The full experiment ran on Google Colab with one T4, torch 2.14.1, in November 2026. Every number below comes from the executed `reversibility.ipynb`, and none is estimated.
+
+**The short version.** Rebuilding activations instead of storing them works on a GPT, and it can be made exact. At the same batch, the reversible model needs 2.7x less memory and fits 3.0x the batch. In exchange it trains 34% slower and ends 0.09 worse in held-out loss. Run 3 was supposed to show what that extra memory buys, and it failed. The failure came from its learning-rate schedule, not from reversibility. It hasn't been rerun yet.
+
+### 1. Picking a design
+
+Four ways to make the layers reversible went head to head on the same 5M tokens. Euler, the plain GPT run backwards, never learned. Its flat line near 7 means its undo diverges, so the gradients it gets are wrong (379x further from the true gradient than plain autograd's). Coupling learned but trailed the plain GPT the whole way. Midpoint tracked the plain GPT almost exactly: 5.344 against 5.345 at 5M tokens.
+
+![Screening: held-out loss of every variant over 5M tokens](plots/screening.png)
+
+Momentum is the surprise. It beat everything, ending 0.25 below the plain GPT, and the selection rule still ruled it out. The rule requires every layer to rebuild its input to within 1e-3, and momentum's undo drifts to 6.4e-3, because it divides by 0.9 at every layer. Its gradients were as accurate as plain autograd's, though. Whether its lead survives 50M tokens is the most interesting question this run leaves open.
+
+So midpoint went on to the 50M-token runs.
+
+### 2. Making the undo exact
+
+To undo a layer, you subtract what it added: x = (x + f) - f. In floating point that isn't always true. The sum rounds, and subtracting f doesn't bring back the bits that were rounded away. The error is tiny for one layer. Rebuilding from the top down, each layer starts from the previous layer's slightly wrong input, so the error grows.
+
+![How far each stream format drifts per layer](plots/recon.png)
+
+By layer 0, midpoint's rebuilt input is 6% off with fp32 streams, 17% with fp16 and 102% with bf16. The fix is to store the streams as int64 counts of 2^-24, which turns every add and subtract into exact integer math. With that format, coupling and midpoint rebuild every layer's input bit for bit: the blue line sits at exactly 0. Their gradients come out as close to an fp64 reference as plain autograd's (0.95x to 0.97x its error). Momentum still drifts with fixed point, because division isn't exact in integers either.
+
+### 3. Fifty million tokens
+
+![Held-out loss over 50M tokens for all three runs](plots/main_loss.png)
+
+The reversible model (green, solid) follows the plain GPT (blue) all the way down and ends at 3.633 against 3.542. The two were level at 5M tokens, so the gap opens later in training. Midpoint is a different wiring of the same blocks (each layer adds to the state from two layers back), not a memory trick on an identical model, so some gap is no surprise. Samples from the two models read about equally well.
+
+The green dashed line is run 3, covered in section 6.
+
+### 4. Where the memory went
+
+![Peak memory per training step, each run alone on the GPU](plots/memory.png)
+
+At batch 64 the plain GPT peaks at 3.54 GB and the reversible one at 1.33 GB. Autograd saves 2,617 MB of activations for the plain GPT and 410 MB for the reversible model, 6.4x less. Across the 10 blocks, the reversible model keeps only two int64 streams (101 MB). Most of what remains (268 MB) is the fp32 log-probabilities that cross-entropy keeps for its backward pass. That is the next target, and computing the loss in chunks would shrink it.
+
+The more useful number is how large a batch fits in the T4's 15.6 GB:
+
+![Peak memory against batch size for both models](plots/probe.png)
+
+The plain GPT fits 296 sequences and the reversible one 888, 3.0x more. At 296 the plain GPT is right at the edge: a 100-step run at that batch ran out of memory, and it fit at 288.
+
+### 5. What it costs in speed
+
+![Training speed, each run alone on the GPU](plots/speed.png)
+
+The reversible model trains 34% slower, at 56.5k tok/s against 85.0k. Most of that is arithmetic. Rebuilding each layer means running the blocks forward a second time, which adds 31% to the work per token. Fixed point adds about 10% more: the same model with fp32 streams runs at 62.9k, but those streams don't undo exactly.
+
+A bigger batch speeds up the plain GPT by 13% (95.8k at batch 288). It barely changes the reversible model (57.0k at batch 888), because at batch 64 the reversible model is already limited by arithmetic, not by how full the GPU is.
+
+### 6. Run 3: a failure, and what caused it
+
+Run 3 trained the reversible model at its largest batch, 888, on the same 50M tokens. That is only 219 steps. It finished at 6.08, and its samples are common words in no order.
+
+The notebook also ran a 100-step speed bench at the same batch of 888. Both runs start from the same weights and see the same batches in the same order. The learning-rate schedule is the only difference, which makes this a clean experiment:
+
+![Learning rate and training loss for run 3 and the bench at the same batch](plots/schedule.png)
+
+*Dots are the steps the notebook printed. The run folder has every step, and `plot.py` draws them all.*
+
+Run 3 (green, dashed) drops faster for 5 steps, then stalls near 7. The bench (gray) passes it by step 40 and is 0.55 lower by step 80.
+
+The top panel shows why. Two rules set run 3's schedule:
+
+- **Scale the learning rate by the square root of the batch.** sqrt(888 / 64) = 3.7, so 1e-3 became 3.7e-3, capped at 3e-3. The idea is that a bigger batch averages away gradient noise, so you can take bigger steps.
+- **Keep warmup at the same share of training.** Run 2's 50 warmup steps are 1.6% of its 3,039. 1.6% of 219 is 4 steps.
+
+So run 3 hit 3e-3 at step 4. AdamW's first updates move each weight by about the learning rate, whatever its gradient says. A typical weight starts at 0.02, and an output projection at 0.0045. One step at 3e-3 moves them by 15% and 67%. The bench's first step moves them by 0.1% and 0.4%.
+
+A bigger batch does lower the gradient noise. It doesn't make the loss surface any less steep at the start of training, and that steepness is what makes large early steps unsafe. Getting past it takes some number of steps, not some share of the run, and 4 steps isn't enough.
+
+One more comparison makes the point. At step 220, run 2 (batch 64) had a training loss of 5.37 after 3.6M tokens. Run 3 had 6.10 after 49.8M. Each of its steps averaged 13.9x more text and still did worse, so the large batch wasn't being used.
+
+The 6.08 measures a bad schedule, not a reversible model at large batch. Even with a sound schedule, 219 steps is very few for this model, and I expect run 3 to finish behind run 2.
+
+### What's next
+
+1. **Rerun run 3 with lr 1e-3 and 50 warmup steps.** That is about 15 minutes on a T4, and it answers the question run 3 was meant to ask.
+2. **Run momentum for 50M tokens.** It had the best loss in screening and was excluded only by the undo rule.
+3. **Spend the memory on depth or context.** On a fixed token budget, a larger batch mostly means fewer steps. A deeper model or a longer context at batch 64 tests what the memory is worth more directly.
+4. **Chunk the loss.** 268 of the 410 MB the reversible model still saves is the loss, not the layers.
+
+<details>
+<summary>All the numbers</summary>
 
 | run | batch | steps | final held-out loss | tok/s | peak memory | MFU | HFU | job time |
 |---|---|---|---|---|---|---|---|---|
-| 1. plain GPT | 64 | 3,039 | **3.5421** | 85,047 | 3.54 GB | 15.2% | 15.2% | 10.7 min |
-| 2. midpoint, fixed-point streams | 64 | 3,039 | 3.6328 | 56,523 | **1.33 GB** | 10.1% | 13.2% | 15.7 min |
+| 1. plain GPT | 64 | 3,039 | 3.5421 | 85,047 | 3.54 GB | 15.2% | 15.2% | 10.7 min |
+| 2. midpoint, fixed-point streams | 64 | 3,039 | 3.6328 | 56,523 | 1.33 GB | 10.1% | 13.2% | 15.7 min |
 | 3. midpoint, largest batch | 888 | 219 | 6.0816 | 57,028 | 15.21 GB | 10.2% | 13.3% | 15.4 min |
+| plain GPT, bench only | 288 | | | 95,779 | 14.91 GB | 17.1% | 17.1% | |
+| midpoint, fp32 streams, bench only | 64 | | | 62,943 | 1.26 GB | 11.3% | 14.7% | |
 
-Speed, memory, MFU and HFU come from separate 100-step bench runs, each alone on the GPU. Job time is the whole training job, evals included. Peak memory is what tensors held, as `torch.cuda.max_memory_allocated` reports it.
+Speed, memory, MFU and HFU come from separate 100-step bench runs, each alone on the GPU. Job time covers the whole training job, evals included.
 
-The reversible model does what it promises on memory and pays for it in speed. At the same batch it needs 2.7x less memory and runs 1.5x slower. Its loss ends 0.091 behind the plain GPT. Run 3 failed, and the cause is its learning-rate schedule, not reversibility.
-
-### Memory
-
-- At batch 64, autograd saves 410 MB for the reversible model and 2,617 MB for the plain one, 6.4x less. Peak memory drops from 3.54 GB to 1.33 GB.
-- The largest batch that fits is 296 for the plain GPT and 888 for the reversible one, 3.0x more. `probe.py` finds these with 3 training steps per try. A 100-step bench of the plain GPT at 296 then ran out of memory and fit at 288 (14.91 GB peak), so 296 is right at the edge.
-- Of the reversible model's 410 MB, 268 MB is the fp32 log-probabilities cross-entropy keeps for backward. The 10 blocks store only two int64 streams, 101 MB. Computing the loss in chunks would be the next large saving.
-
-### Speed
-
-- The reversible model trains at 56,523 tok/s against 85,047, 34% fewer. Rebuilding each layer means one extra forward pass of the blocks, which adds 31% to the arithmetic per token (HFU 13.2% over MFU 10.1%). That covers most of the gap.
-- Fixed-point streams cost 10%. The same model with fp32 streams runs at 62,943 tok/s, but fp32 streams do not undo exactly (see Checks below).
-- A bigger batch speeds up the plain GPT by 13% (95,779 tok/s at 288) and the reversible one by under 1% (57,028 at 888). The reversible model is already limited by arithmetic at batch 64.
-
-### Screening, 5M tokens each at batch 64
-
-A variant is eligible when its gradient error against fp64 is at most 1.5x plain autograd's and no layer's rebuilt input is off by more than 1e-3. The lowest held-out loss wins, and among variants within 0.02 of it, the fastest.
+Screening, 5M tokens at batch 64. A variant is eligible when its gradient error against fp64 is at most 1.5x plain autograd's and its worst rebuilt input is within 1e-3. The lowest loss wins, and among variants within 0.02 of it, the fastest.
 
 | run | held-out loss, last 3 avg | tok/s | gradient error / plain | worst undo error | eligible |
 |---|---|---|---|---|---|
 | plain GPT | 5.3451 | 88,919 | 1.00 | - | reference |
 | coupling, fixed point | 5.5284 | 53,489 | 0.97 | 0 | yes |
 | coupling, fp32 | 5.5202 | 64,724 | 1.24 | 2.9e-2 | no |
-| **midpoint, fixed point** | **5.3441** | 57,494 | 0.95 | 0 | **winner** |
+| midpoint, fixed point | 5.3441 | 57,494 | 0.95 | 0 | winner |
 | midpoint, fp32 | 5.3471 | 63,466 | 1.02 | 6.2e-2 | no |
 | momentum, fp32 | 5.0994 | 60,623 | 0.99 | 6.4e-3 | no |
 | euler, fp32 | 6.9230 | 38,632 | 379.72 | 3.6e+3 | no |
 
-Momentum had the lowest loss of all seven, 0.25 below the plain GPT, and the rule shut it out only for its undo error of 6.4e-3. Its gradients were as accurate as plain autograd's. I haven't tested whether that lead survives to 50M tokens, and it is the most interesting open question here. Midpoint tied the plain GPT at 5M tokens (5.344 against 5.345) and fell 0.091 behind by 50M.
+T4 precision: fp16 matmuls run at 27.0 TFLOPS, fp32 at 4.3 and bf16 at 2.5, because the T4 emulates bf16. Training runs at 97k, 28k and 19k tok/s, which is why the runs use fp16.
 
-### Run 3 failed because of its learning-rate schedule
-
-Run 3 ended at 6.08, and its samples are common words in no order. The notebook also ran a 100-step bench at the same batch of 888. Both start from the same weights and see the same batches, so the learning rate is the only difference. Training loss:
-
-| step | 5 | 20 | 40 | 60 | 80 |
-|---|---|---|---|---|---|
-| bench: lr 1e-3, 50-step warmup | 7.83 | 7.01 | 6.46 | 6.04 | 5.79 |
-| run 3: lr 3e-3, 4-step warmup | 7.06 | 7.00 | 6.80 | 6.54 | 6.34 |
-
-Run 3 drops faster for 5 steps, then stalls, and the bench passes it by step 40.
-
-The schedule came from two rules. Scaling lr by sqrt(888 / 64) gave 3.7e-3, capped at 3e-3. Keeping warmup at 1.6% of training, as in run 2, cut it from 50 steps to 4. AdamW's first updates move each weight by about the learning rate, whatever its gradient. So from step 4, every step moved a typical starting weight (std 0.02) by 15%, and an output-projection weight (std 0.0045) by 67%. The square-root rule assumes gradient noise is the limit on step size. A bigger batch does lower that noise. It does not make the loss surface any less sharp at the start of training, and that sharpness is what makes big early steps unsafe. Warmup is there to get past this region, and that takes some number of steps, not some share of training.
-
-After step 20, run 3's loss creeps from 6.80 to 6.10 while its gradient norm sits at 0.1 to 0.2. At step 220, run 2 had a training loss of 5.37 after 3.6M tokens, and run 3 had 6.10 after 49.8M. Each of run 3's steps averaged 13.9x more text and still did worse.
-
-So the 6.08 measures this schedule, not a reversible model at large batch. Rerunning run 3 with lr 1e-3 and 50 warmup steps would test the real question. I haven't done that yet. Even then, 219 steps is very few for this model, and it will most likely finish behind run 2.
-
-### Checks on the T4
-
-- **Gradients.** With fixed-point streams and fp16 matmuls, the gradient error of coupling, midpoint and momentum against fp64 is 0.95x to 0.97x plain autograd's. Euler's is 379x. In fp64 on the CPU, coupling, midpoint and momentum match autograd to 3e-8. Euler is off by 1.7.
-- **Undo.** After 5M tokens of training, fixed-point coupling and midpoint rebuild every layer's input exactly (error 0). With float streams, midpoint's layer-0 input is 6% off in fp32, 17% in fp16 and 102% in bf16. Momentum drifts to 0.5% even with fixed point.
-- **Precision.** On the T4, fp16 matmuls run at 27.0 TFLOPS, fp32 at 4.3 and bf16 at 2.5, because the T4 emulates bf16. Training runs at 97k, 28k and 19k tok/s. That's why the runs use fp16.
+</details>
 
 ## Findings from building it (Mac, before the T4 run)
 
-These come from the gradient check and the smoke run on a MacBook Air M4 (bf16); the files are in `runs/mac/`. The T4 run confirmed the first three (see Checks on the T4 above).
+These come from the gradient check and the smoke run on a MacBook Air M4 (bf16); the files are in `runs/mac/`. The T4 run confirmed the first three (see sections 1 and 2 of Results).
 
 - **fp32 streams do not undo exactly; fixed-point streams do.** (x + f) - f in fp32 can be off by one last bit. The rebuilt input then differs by about 1e-7, which inside a bf16/fp16 block can flip a value to the next 16-bit step, and that error compounds down the stack. After 18 training steps, midpoint with fp32 streams rebuilt the first layer's input 38% off; coupling 4%. Storing the streams as int64 counts of 2^-24 and rounding each correction to that grid makes every add and subtract exact: coupling and midpoint then rebuild every input bit for bit (error exactly 0), and their gradients are as close to an fp64 answer as plain autograd's (ratio 0.96 to 0.99). MacKay et al. (2018) used fixed point for reversible RNNs.
 - **Euler cannot be undone on this model.** Its fixed-point repeats diverge: LayerNorm divides by the spread of its input, which is about 0.03 at initialization, so the block is steep and two inputs can give one output. At initialization its rebuilt input was off by 209% (fp64) and its bf16 gradients were 174x further from the fp64 answer than plain autograd's.
@@ -118,7 +166,8 @@ These come from the gradient check and the smoke run on a MacBook Air M4 (bf16);
 | `precision.py` | fp32 / fp16 / bf16 speed; reconstruction drift by stream format | new |
 | `probe.py` | largest batch that fits: double, then bisect; one process per try | new |
 | `jobs.py` | one run per GPU at a time; skip finished runs, resume unfinished ones | new |
-| `plot.py` | the figures in `plots/` | new |
+| `plot.py` | the figures in `plots/`: `uv run plot.py --runs <run folder> --out plots` | new |
+| `plots/` | the figures in this README, from the Colab run | new |
 | `parallel_checks.py` | the code behind `parallelism.ipynb` | new |
 | `model.py` | the GPT | a10, unchanged |
 | `data.py` | FineWeb-Edu download and tokenization | a10, plus `--tokenizer` |

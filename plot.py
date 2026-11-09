@@ -11,6 +11,7 @@ JSONs) and skips any figure whose inputs are missing, so it works on a half-fini
     memory.png      what one step holds at its peak, solo runs
     speed.png       tokens per second, solo runs
     recon.png       how far the undo drifts per layer, by how the streams are stored
+    schedule.png    run 3 against the bench at the same batch: learning rate and training loss per step
 
 Colors follow the architecture everywhere (plain GPT is always blue, coupling always orange...),
 in the reference palette's fixed order. Line style carries the second thing that varies.
@@ -150,10 +151,14 @@ def bench_rows(runs):
     rows = []
     if not os.path.isdir(root):
         return rows
-    for name in sorted(os.listdir(root)):
+    for name in sorted(os.listdir(root), key=lambda n: ("max" in n, "fp32" in n, n)):  # batch 64 first, then max
         b = load_json(os.path.join(root, name, "bench.json"))
         if b:
-            rows.append((f"{NAMES[b['arch']]}, batch {b['micro_batch']}", b))
+            # Name the stream format when it isn't the default fixed point, or two benches of the
+            # same model and batch share a label and barh draws them on one row.
+            sd = b.get("stream_dtype")
+            streams = f", {sd} streams" if sd and sd != "fixed" else ""
+            rows.append((f"{NAMES[b['arch']]}{streams}, batch {b['micro_batch']}", b))
     return rows
 
 
@@ -175,6 +180,42 @@ def bars(rows, value, xlabel, title, path, fmt):
     fig.tight_layout()
     fig.savefig(path, dpi=150)
     plt.close(fig)
+
+
+def draw_schedule(series, path, title):
+    """Learning rate (top) and training loss (bottom) per step, one line per run.
+
+    series: list of (label, color, linestyle, lr_steps, lrs, loss_steps, losses).
+    """
+    fig, (top, bot) = plt.subplots(2, 1, figsize=(8, 6.2), sharex=True, gridspec_kw={"height_ratios": [1, 1.6]})
+    for label, color, ls, lr_x, lr_y, loss_x, loss_y in series:
+        top.plot(lr_x, [v * 1e3 for v in lr_y], ls, color=color, label=label)
+        bot.plot(loss_x, loss_y, ls, color=color, marker="o" if len(loss_x) < 30 else None, ms=5, label=label)
+        bot.annotate(f"{loss_y[-1]:.2f}", (loss_x[-1], loss_y[-1]), xytext=(6, 0), textcoords="offset points",
+                     va="center", color=INK, fontsize=9)
+    top.set_ylabel("learning rate (x 1e-3)")
+    top.set_title(title)
+    bot.set_ylabel("training loss")
+    bot.set_xlabel("step (each step: 888 sequences x 256 tokens)")
+    bot.legend(loc="upper right", fontsize=9)
+    fig.tight_layout()
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
+
+
+def schedule(runs, out):
+    """Run 3 against the bench at the same batch: same weights and batches, different schedule."""
+    run3 = [r for r in load_jsonl(os.path.join(runs, "main", "rev_max", "metrics.jsonl")) if r["type"] == "train"]
+    bench = [r for r in load_jsonl(os.path.join(runs, "bench", "rev_bmax", "bench.jsonl")) if r["type"] == "train"]
+    if not run3 or not bench:
+        return
+    n = len(bench)
+    series = []
+    for label, color, ls, rows in (("bench: lr 1e-3, 50-step warmup", INK2, "-", bench),
+                                   ("run 3: lr 3e-3, 4-step warmup", ARCH_COLOR["midpoint"], "--", run3[:n])):
+        xs = [r["step"] for r in rows]
+        series.append((label, color, ls, xs, [r["lr"] for r in rows], xs, [r["loss"] for r in rows]))
+    draw_schedule(series, os.path.join(out, "schedule.png"), "Same batch of 888, two learning-rate schedules")
 
 
 def recon(runs, out):
@@ -226,6 +267,7 @@ def main():
     bars(rows, lambda b: b["tok_per_s"] / 1e3, "thousand tokens per second (solo run, median step)",
          "Training speed", os.path.join(args.out, "speed.png"), lambda v: f"{v:.1f}k")
     recon(args.runs, args.out)
+    schedule(args.runs, args.out)
     print(f"wrote {', '.join(sorted(f for f in os.listdir(args.out) if f.endswith('.png')))} to {args.out}/")
 
 
