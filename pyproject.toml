@@ -1,0 +1,22 @@
+[project]
+name = "a13-reversibility"
+version = "0.1.0"
+description = "A 19.4M GPT trained on 50M tokens three ways: plain, reversible at the same batch, reversible at its largest batch"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "huggingface-hub>=0.30",
+    "matplotlib>=3.9",
+    "numpy>=2.0",
+    "pyarrow>=17",
+    "tokenizers>=0.20",
+    "torch>=2.6",
+]
+
+[dependency-groups]
+dev = [
+    "ipykernel>=6.29",
+    "nbconvert>=7.16",
+    "nbformat>=5.10",
+    "pytest>=8",
+]

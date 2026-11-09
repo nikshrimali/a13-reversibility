@@ -1,0 +1,11 @@
+__pycache__/
+*.py[oc]
+.ipynb_checkpoints/
+.venv
+.DS_Store
+
+# Tokenized data and checkpoints stay out of git; metrics, probes and summaries are committed
+data/
+runs/**/ckpt.pt*
+runs/smoke*/
+smoke_run.ipynb

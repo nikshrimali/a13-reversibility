@@ -1,0 +1,92 @@
+{
+  "table": [
+    {
+      "run": "gpt",
+      "arch": "gpt",
+      "stream": null,
+      "loss": 7.073406497637431,
+      "final": 6.986661672592163,
+      "tok_per_s": 12654.572515705475,
+      "grad_ratio": 1.0,
+      "recon": null,
+      "eligible": false
+    },
+    {
+      "run": "coupling",
+      "arch": "coupling",
+      "stream": "fixed",
+      "loss": 8.39883816242218,
+      "final": 10.983455896377563,
+      "tok_per_s": 8239.194447710817,
+      "grad_ratio": 0.9613468160201432,
+      "recon": 0.0,
+      "eligible": true
+    },
+    {
+      "run": "coupling_fp32",
+      "arch": "coupling",
+      "stream": "fp32",
+      "loss": 8.384604652722677,
+      "final": 10.940776109695435,
+      "tok_per_s": 8496.5786211252,
+      "grad_ratio": 0.9892554419969856,
+      "recon": 0.041185390142905454,
+      "eligible": false
+    },
+    {
+      "run": "midpoint",
+      "arch": "midpoint",
+      "stream": "fixed",
+      "loss": 7.028532902399699,
+      "final": 6.934269905090332,
+      "tok_per_s": 6978.166291310579,
+      "grad_ratio": 0.9944419049588269,
+      "recon": 0.0,
+      "eligible": true
+    },
+    {
+      "run": "midpoint_fp32",
+      "arch": "midpoint",
+      "stream": "fp32",
+      "loss": 7.028486371040344,
+      "final": 6.934207558631897,
+      "tok_per_s": 6825.900766470304,
+      "grad_ratio": 1.2189280674072445,
+      "recon": 0.3798646038694703,
+      "eligible": false
+    },
+    {
+      "run": "momentum",
+      "arch": "momentum",
+      "stream": "fp32",
+      "loss": 7.0222706000010175,
+      "final": 6.930602550506592,
+      "tok_per_s": 6776.114032607012,
+      "grad_ratio": 3.0325525510434486,
+      "recon": 0.05072271139538229,
+      "eligible": false
+    },
+    {
+      "run": "euler",
+      "arch": "euler",
+      "stream": "fp32",
+      "loss": 7.056209683418274,
+      "final": 6.966761231422424,
+      "tok_per_s": 4666.663588025699,
+      "grad_ratio": 173.53327591373812,
+      "recon": 24.083669708014597,
+      "eligible": false
+    }
+  ],
+  "winner": {
+    "run": "midpoint",
+    "arch": "midpoint",
+    "stream": "fixed",
+    "loss": 7.028532902399699,
+    "final": 6.934269905090332,
+    "tok_per_s": 6978.166291310579,
+    "grad_ratio": 0.9944419049588269,
+    "recon": 0.0,
+    "eligible": true
+  }
+}

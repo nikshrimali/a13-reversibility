@@ -1,0 +1,237 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Undo instead of remember</title>
+<style>
+:root {
+  color-scheme: light;
+  --bg: #fcfcfb; --panel: #f3f2ef; --line: #e4e3df; --ink: #0b0b0b; --ink2: #52514e; --ink3: #8a8984;
+  --s1: #2a78d6; --s2: #eb6834; --good: #008300; --bad: #e34948; --mem: #2a78d6; --memsoft: #cde2fb;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --bg: #1a1a19; --panel: #242422; --line: #3a3a37; --ink: #f0efec; --ink2: #c3c2b7; --ink3: #8f8e86;
+    --s1: #3987e5; --s2: #d95926; --good: #3fae3f; --bad: #e66767; --mem: #3987e5; --memsoft: #184f95;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #1a1a19; --panel: #242422; --line: #3a3a37; --ink: #f0efec; --ink2: #c3c2b7; --ink3: #8f8e86;
+  --s1: #3987e5; --s2: #d95926; --good: #3fae3f; --bad: #e66767; --mem: #3987e5; --memsoft: #184f95;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink); font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+main { max-width: 980px; margin: 0 auto; padding: 24px 16px 48px; }
+h1 { font-size: 24px; margin: 0 0 4px; }
+.sub { color: var(--ink2); margin: 0 0 20px; }
+.controls { display: flex; flex-wrap: wrap; gap: 12px 20px; align-items: center; margin-bottom: 16px; }
+.group { display: flex; gap: 4px; flex-wrap: wrap; align-items: center; }
+.group span.lbl { color: var(--ink2); font-size: 13px; margin-right: 4px; }
+button { font: inherit; font-size: 14px; border: 1px solid var(--line); background: var(--panel); color: var(--ink);
+  padding: 6px 12px; border-radius: 6px; cursor: pointer; }
+button[aria-pressed="true"] { background: var(--ink); color: var(--bg); border-color: var(--ink); }
+button.primary { background: var(--s1); color: #fff; border-color: var(--s1); }
+button:disabled { opacity: .45; cursor: default; }
+.caption { background: var(--panel); border-radius: 8px; padding: 12px 14px; min-height: 76px; margin-bottom: 16px;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 13.5px; white-space: pre-wrap; }
+.caption b { font-family: system-ui, sans-serif; font-size: 14px; }
+.grid { display: grid; grid-template-columns: 1fr 220px; gap: 16px; }
+@media (max-width: 720px) { .grid { grid-template-columns: 1fr; } }
+table { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; }
+th, td { text-align: right; padding: 6px 8px; border-bottom: 1px solid var(--line); font-size: 14px; }
+th { color: var(--ink2); font-weight: 600; font-size: 12.5px; }
+th:first-child, td:first-child { text-align: left; }
+tr.active td { background: var(--panel); }
+td.dim { color: var(--ink3); }
+td .ok { color: var(--good); font-weight: 600; }
+td .off { color: var(--bad); font-weight: 600; }
+.mem { border: 1px solid var(--line); border-radius: 8px; padding: 12px; }
+.mem h3 { margin: 0 0 8px; font-size: 14px; }
+.slot { border-radius: 4px; padding: 4px 8px; margin-bottom: 4px; font-size: 13px; background: var(--memsoft); color: var(--ink); }
+.slot.empty { background: transparent; border: 1px dashed var(--line); color: var(--ink3); }
+.memtotal { margin-top: 8px; font-size: 13px; color: var(--ink2); }
+.notes { color: var(--ink2); font-size: 14px; margin-top: 20px; }
+.notes code { font-size: 13px; }
+.funcs { color: var(--ink2); font-size: 13px; margin: 0 0 12px; font-family: ui-monospace, Menlo, monospace; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Undo instead of remember</h1>
+  <p class="sub">A 4-layer toy network with one number per stream. Run it forward, then backward, and watch what each design has to keep in memory and how well it rebuilds each layer's input. Companion to <code>guide.md</code> Parts 7 to 9.</p>
+
+  <div class="controls">
+    <div class="group" id="modes"><span class="lbl">design</span></div>
+    <div class="group" id="arith"><span class="lbl">arithmetic</span></div>
+    <div class="group">
+      <button id="back">Back</button>
+      <button id="next" class="primary">Next</button>
+      <button id="reset">Reset</button>
+    </div>
+  </div>
+
+  <div class="funcs" id="funcs"></div>
+  <div class="caption" id="caption" aria-live="polite"></div>
+
+  <div class="grid">
+    <div><table id="tbl"></table></div>
+    <div class="mem"><h3>Memory kept for the backward pass</h3><div id="mem"></div><div class="memtotal" id="memtotal"></div></div>
+  </div>
+
+  <div class="notes">
+    <p><b>What to try.</b> Plain: memory fills with every layer's input. Coupling and midpoint with exact arithmetic: every input comes back exactly, from the final state alone. Switch to the 3-digit calculator: the rebuilt inputs drift, worst at the bottom. Switch to fixed point (whole hundredths): exact again. (Its grid is the same size for every number, so the start, 0.0137, is stored as 0.01. Our model's grid is 2<sup>-24</sup>, about 0.00000006, far finer than its smallest stream numbers.) Euler: the guesses close in for layers 4 and 2, and fly apart in the steep layer 3, after which everything below it is wrong. Momentum: the divide by 0.9 makes the 3-digit errors grow.</p>
+    <p>The real model does the same with 384 numbers per token, 256 tokens per sequence and 10 layers. Its fixed-point unit is 2<sup>-24</sup>, not a hundredth.</p>
+  </div>
+</main>
+<script>
+// ---- the toy network -------------------------------------------------------------------------
+// Each layer has an "attention" piece A and an "MLP" piece M, both deliberately not undoable
+// (a square loses the sign). F is the whole block's correction.
+const L = 4;
+// Layer 3 is steep (F changes 3x as fast as its input), which is where Euler's guessing fails.
+const A = [x => 0.1 * x * x + 1.23, x => 0.3 * x * x / (1 + Math.abs(x)), x => 0.6 * x * x, x => 0.3 * x * x / (1 + Math.abs(x))];
+const M = [y => 0.2 * y - 0.1, y => 0.5 - 0.2 * y, y => 0.1 * y, y => 0.4 - 0.1 * y];
+const Atxt = ["0.1x² + 1.23", "0.3x²/(1+|x|)", "0.6x² (steep)", "0.3x²/(1+|x|)"];
+const Mtxt = ["0.2y - 0.1", "0.5 - 0.2y", "0.1y", "0.4 - 0.1y"];
+const F = (n, x) => { const a = A[n](x); return a + M[n](x + a); };
+const G = 0.9; // momentum
+const START = 0.0137; // small, like the real embedding's numbers (spread about 0.03)
+
+let mode = "plain", arith = "exact", step = 0;
+
+// arithmetic: exact (JS doubles), 3 significant digits, or fixed point in hundredths
+function store(v) {
+  if (arith === "digits") { if (v === 0) return 0; const p = Math.pow(10, 2 - Math.floor(Math.log10(Math.abs(v)))); return Math.round(v * p) / p; }
+  if (arith === "fixed") return Math.round(v * 100) / 100;
+  return v;
+}
+function addc(s, f, sign) { // s + sign * f, with the correction rounded first in fixed point
+  if (arith === "fixed") { const q = Math.round(f * 100); return (Math.round(s * 100) + sign * q) / 100; }
+  return store(s + sign * f);
+}
+const fmt = v => (Math.abs(v) >= 100 ? v.toFixed(1) : v.toFixed(arith === "exact" ? 4 : 3));
+
+// ---- one forward step and one undo per design ------------------------------------------------
+function fwd(n, s) {
+  const [a, b] = s;
+  if (mode === "coupling") { const y1 = addc(a, A[n](b), 1); const y2 = addc(b, M[n](y1), 1);
+    return { s: [y1, y2], txt: `y1 = x1 + A(x2) = ${fmt(a)} + ${fmt(A[n](b))} = ${fmt(y1)}\ny2 = x2 + M(y1) = ${fmt(b)} + ${fmt(M[n](y1))} = ${fmt(y2)}` }; }
+  if (mode === "midpoint") { const nx = addc(a, F(n, b), 1);
+    return { s: [b, nx], txt: `x[next] = x[prev] + F(x[now]) = ${fmt(a)} + ${fmt(F(n, b))} = ${fmt(nx)}` }; }
+  if (mode === "momentum") { const v = store(G * b + (1 - G) * F(n, a)); const x = addc(a, v, 1);
+    return { s: [x, v], txt: `v' = 0.9 v + 0.1 F(x) = 0.9 x ${fmt(b)} + 0.1 x ${fmt(F(n, a))} = ${fmt(v)}\nx' = x + v' = ${fmt(a)} + ${fmt(v)} = ${fmt(x)}` }; }
+  const y = addc(a, F(n, a), 1); // plain and euler: the same forward
+  return { s: [y, 0], txt: `y = x + F(x) = ${fmt(a)} + ${fmt(F(n, a))} = ${fmt(y)}` };
+}
+function undo(n, s) {
+  const [a, b] = s;
+  if (mode === "coupling") { const x2 = addc(b, M[n](a), -1); const x1 = addc(a, A[n](x2), -1);
+    return { s: [x1, x2], txt: `x2 = y2 - M(y1) = ${fmt(b)} - ${fmt(M[n](a))} = ${fmt(x2)}\nx1 = y1 - A(x2) = ${fmt(a)} - ${fmt(A[n](x2))} = ${fmt(x1)}` }; }
+  if (mode === "midpoint") { const p = addc(b, F(n, a), -1);
+    return { s: [p, a], txt: `x[prev] = x[next] - F(x[now]) = ${fmt(b)} - ${fmt(F(n, a))} = ${fmt(p)}` }; }
+  if (mode === "momentum") { const x = addc(a, b, -1); const v = store((b - (1 - G) * F(n, x)) / G);
+    return { s: [x, v], txt: `x = x' - v' = ${fmt(a)} - ${fmt(b)} = ${fmt(x)}\nv = (v' - 0.1 F(x)) / 0.9 = (${fmt(b)} - ${fmt(0.1 * F(n, x))}) / 0.9 = ${fmt(v)}` }; }
+  // euler: guess x = y, then x = y - F(x), 3 times
+  let x = a; const g = [x];
+  for (let i = 0; i < 3; i++) { x = addc(a, F(n, x), -1); g.push(x); }
+  return { s: [x, 0], txt: `guess x = y - F(x), starting from x = y:\n  ${g.map(fmt).join("  ->  ")}\ncheck: x + F(x) = ${fmt(x + F(n, x))}, should be ${fmt(a)}` };
+}
+
+// ---- the run: forward states, then the undo states -------------------------------------------
+function initState() {
+  const h = store(START);
+  if (mode === "momentum") return [h, 0];
+  if (mode === "plain" || mode === "euler") return [h, 0];
+  return [h, h];
+}
+function build() {
+  const fw = [initState()], ftxt = [];
+  for (let n = 0; n < L; n++) { const r = fwd(n, fw[n]); fw.push(r.s); ftxt.push(r.txt); }
+  const bw = new Array(L + 1).fill(null), btxt = new Array(L).fill("");
+  bw[L] = fw[L];
+  for (let n = L - 1; n >= 0; n--) {
+    if (mode === "plain") { bw[n] = fw[n]; btxt[n] = `read layer ${n + 1}'s input from memory: ${fmt(fw[n][0])}`; continue; }
+    const r = undo(n, bw[n + 1]); bw[n] = r.s; btxt[n] = r.txt;
+  }
+  return { fw, ftxt, bw, btxt };
+}
+const twoStreams = () => mode === "coupling" || mode === "midpoint" || mode === "momentum";
+const names = () => mode === "coupling" ? ["x1", "x2"] : mode === "midpoint" ? ["x[n-1]", "x[n]"] : mode === "momentum" ? ["x", "v"] : ["x", ""];
+const maxStep = () => 2 * L + 1;
+
+function render() {
+  const run = build(), [n1, n2] = names();
+  document.getElementById("funcs").textContent = Array.from({ length: L }, (_, n) => `layer ${n + 1}: A(x) = ${Atxt[n]}, M(y) = ${Mtxt[n]}`).join("   |   ");
+  let cap;
+  if (step === 0) cap = `<b>Start.</b> The embedding gives the first layer its input, ${fmt(run.fw[0][0])}. Press Next to run the layers forward.`;
+  else if (step <= L) cap = `<b>Forward, layer ${step}.</b>\n` + run.ftxt[step - 1];
+  else if (step === L + 1) cap = `<b>The loss is computed from the last layer's output.</b> Backward starts here and walks down the layers. ` + (mode === "plain" ? "The plain network reads each layer's input from memory." : "The reversible network has only the final state, and rebuilds each input.");
+  else { const n = 2 * L + 1 - step; cap = `<b>Backward, layer ${n + 1}: ${mode === "plain" ? "look up" : "undo"}.</b>\n` + run.btxt[n]; }
+  document.getElementById("caption").innerHTML = cap;
+
+  const rows = [];
+  rows.push(`<tr><th>layer input</th><th>true ${n1}</th>${twoStreams() ? `<th>true ${n2}</th>` : ""}<th>rebuilt</th><th>off by</th></tr>`);
+  for (let i = L; i >= 0; i--) {
+    const fwdDone = step >= i, bwdDone = i === L ? step >= L + 1 : step >= 2 * L + 1 - i;
+    const active = (step >= 1 && step <= L && i === step) || (step > L + 1 && i === 2 * L + 1 - step);
+    const t = run.fw[i], r = run.bw[i];
+    const label = i === L ? "final output" : `layer ${i + 1}`;
+    let rebuilt = "", off = "";
+    if (bwdDone && r) {
+      rebuilt = twoStreams() ? `${fmt(r[0])}, ${fmt(r[1])}` : fmt(r[0]);
+      const e = Math.max(Math.abs(r[0] - t[0]), twoStreams() ? Math.abs(r[1] - t[1]) : 0);
+      const size = Math.max(Math.abs(t[0]), twoStreams() ? Math.abs(t[1]) : 0) || 1;
+      const pct = e / size * 100;
+      off = i === L ? "" : (e === 0 ? `<span class="ok">exactly 0</span>`
+        : e < 1e-9 ? `<span class="ok">${e.toExponential(0)}</span>`
+        : `<span class="off">${fmt(e)} (${pct >= 1000 ? "&gt;1000" : pct.toFixed(pct < 1 ? 2 : 0)}%)</span>`);
+    }
+    rows.push(`<tr class="${active ? "active" : ""}"><td>${label}</td><td class="${fwdDone ? "" : "dim"}">${fwdDone ? fmt(t[0]) : "?"}</td>` +
+      (twoStreams() ? `<td class="${fwdDone ? "" : "dim"}">${fwdDone ? fmt(t[1]) : "?"}</td>` : "") + `<td>${rebuilt}</td><td>${off}</td></tr>`);
+  }
+  document.getElementById("tbl").innerHTML = rows.join("");
+
+  // memory: plain keeps every layer's input (and scratch) until backward uses it; reversible keeps the final state
+  const mem = [];
+  let units = 0;
+  if (mode === "plain") {
+    for (let i = 0; i < L; i++) {
+      const kept = step > i && step < 2 * L + 1 - i;
+      mem.push(`<div class="slot ${kept ? "" : "empty"}">layer ${i + 1}: input + scratch work</div>`);
+      if (kept) units += 1;
+    }
+  } else {
+    const kept = step >= L;
+    mem.push(`<div class="slot ${kept ? "" : "empty"}">final state (${twoStreams() ? "2 numbers" : "1 number"})</div>`);
+    if (step > L + 1) { mem.push(`<div class="slot">layer ${2 * L + 2 - step}: scratch work, redone now, freed next</div>`); units += 1; }
+    for (let i = 0; i < L - 1; i++) mem.push(`<div class="slot empty">nothing for layer ${i + 1}</div>`);
+  }
+  document.getElementById("mem").innerHTML = mem.join("");
+  document.getElementById("memtotal").textContent = mode === "plain" ? `${units} of ${L} layers' scratch work held` : `at most 1 layer's scratch work held at any time`;
+  document.getElementById("back").disabled = step === 0;
+  document.getElementById("next").disabled = step === maxStep();
+}
+
+function buttons(id, opts, get, set) {
+  const g = document.getElementById(id);
+  for (const [v, label] of opts) {
+    const b = document.createElement("button");
+    b.textContent = label; b.dataset.v = v;
+    b.onclick = () => { set(v); [...g.querySelectorAll("button")].forEach(x => x.setAttribute("aria-pressed", x.dataset.v === get())); render(); };
+    b.setAttribute("aria-pressed", v === get());
+    g.appendChild(b);
+  }
+}
+buttons("modes", [["plain", "Plain"], ["coupling", "Coupling"], ["midpoint", "Midpoint"], ["euler", "Euler"], ["momentum", "Momentum"]], () => mode, v => { mode = v; });
+buttons("arith", [["exact", "Exact"], ["digits", "3-digit calculator"], ["fixed", "Fixed point (hundredths)"]], () => arith, v => { arith = v; });
+document.getElementById("next").onclick = () => { step = Math.min(maxStep(), step + 1); render(); };
+document.getElementById("back").onclick = () => { step = Math.max(0, step - 1); render(); };
+document.getElementById("reset").onclick = () => { step = 0; render(); };
+document.addEventListener("keydown", e => { if (e.key === "ArrowRight") document.getElementById("next").click(); if (e.key === "ArrowLeft") document.getElementById("back").click(); });
+render();
+</script>
+</body>
+</html>
